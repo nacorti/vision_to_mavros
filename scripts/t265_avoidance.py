@@ -97,27 +97,6 @@ pipe = None
 pose_data_confidence_level = ('Failed', 'Low', 'Medium', 'High')
 
 #######################################
-# Parameters for OpenCV
-#######################################
-# Configure the OpenCV stereo algorithm. See
-# https://docs.opencv.org/3.4/d2/d85/classcv_1_1StereoSGBM.html for a
-# description of the parameters
-window_size = 5
-min_disp = 0
-# must be divisible by 16
-num_disp = 112 - min_disp
-max_disp = min_disp + num_disp
-stereo = cv2.StereoSGBM_create(minDisparity = min_disp,
-                                numDisparities = num_disp,
-                                blockSize = 16,
-                                P1 = 8*3*window_size**2,
-                                P2 = 32*3*window_size**2,
-                                disp12MaxDiff = 1,
-                                uniquenessRatio = 10,
-                                speckleWindowSize = 100,
-                                speckleRange = 32)
-
-#######################################
 # Parsing user' inputs
 #######################################
 
@@ -193,12 +172,6 @@ else:
     else:
         print("INFO: Using scale factor", scale_factor)
 
-if not camera_orientation:
-    camera_orientation = camera_orientation_default
-    print("INFO: Using default camera orientation", camera_orientation)
-else:
-    print("INFO: Using camera orientation", camera_orientation)
-
 if not display_enable:
     display_enable = 0
     print("INFO: Display images: Disabled")
@@ -206,9 +179,10 @@ else:
     display_enable = 1
     print("INFO: Display images: Enabled. Checking if monitor is connected...")
     WINDOW_TITLE = 'T265 images'
-    cv2.namedWindow(WINDOW_TITLE, cv2.WND_PROP_FULLSCREEN)
-    cv2.setWindowProperty(WINDOW_TITLE,cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
-    print("INFO: Monitor is connected. Press `q` to exit.")
+    cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_AUTOSIZE)
+    print("INFO: Monitor is connected")
+    print("INFO: Press `s`: stack the images side by side, `o`: overlay depth over rgb, `q`: exit.")
+    display_mode = "stack"
 
 if not debug_enable:
     debug_enable = 0
@@ -222,6 +196,12 @@ else:
 #   1: Downfacing, USB port to the right 
 # Important note for downfacing camera: you need to tilt the vehicle's nose up a little - not flat - before you run the script, otherwise the initial yaw will be randomized, read here for more details: https://github.com/IntelRealSense/librealsense/issues/4080. Tilt the vehicle to any other sides and the yaw might not be as stable.
 
+if not camera_orientation:
+    camera_orientation = camera_orientation_default
+    print("INFO: Using default camera orientation", camera_orientation)
+else:
+    print("INFO: Using camera orientation", camera_orientation)
+
 if camera_orientation == 0: 
     # Forward, USB port to the right
     H_aeroRef_T265Ref = np.array([[0,0,-1,0],[1,0,0,0],[0,-1,0,0],[0,0,0,1]])
@@ -234,9 +214,6 @@ else:
     # Default is facing forward, USB port to the right
     H_aeroRef_T265Ref = np.array([[0,0,-1,0],[1,0,0,0],[0,-1,0,0],[0,0,0,1]])
     H_T265body_aeroBody = np.linalg.inv(H_aeroRef_T265Ref)
-
-
-
 
 #######################################
 # Functions for OpenCV 
@@ -442,6 +419,73 @@ def realsense_connect():
     # Start streaming with requested config and callback
     pipe.start(cfg)
 
+#######################################
+# Main code starts here
+#######################################
+
+# Set up a mutex to share data between threads 
+frame_mutex = threading.Lock()
+
+print("INFO: Connecting to Realsense camera.")
+realsense_connect()
+print("INFO: Realsense connected.")
+
+print("INFO: Connecting to vehicle.")
+while (not vehicle_connect()):
+    pass
+print("INFO: Vehicle connected.")
+
+# Listen to the mavlink messages that will be used as trigger to set EKF home automatically
+vehicle.add_message_listener('STATUSTEXT', statustext_callback)
+
+if compass_enabled == 1:
+    # Listen to the attitude data in aeronautical frame
+    vehicle.add_message_listener('ATTITUDE', att_msg_callback)
+
+data = None
+current_confidence = None
+H_aeroRef_aeroBody = None
+heading_north_yaw = None
+
+# Send MAVlink messages in the background
+sched = BackgroundScheduler()
+
+sched.add_job(send_vision_position_message, 'interval', seconds = 1/vision_msg_hz)
+sched.add_job(send_confidence_level_dummy_message, 'interval', seconds = 1/confidence_msg_hz)
+
+# For scale calibration, we will use a thread to monitor user input
+if scale_calib_enable == True:
+    scale_update_thread = threading.Thread(target=scale_update)
+    scale_update_thread.daemon = True
+    scale_update_thread.start()
+
+sched.start()
+
+if compass_enabled == 1:
+    # Wait a short while for yaw to be correctly initiated
+    time.sleep(1)
+
+print("INFO: Sending VISION_POSITION_ESTIMATE messages to FCU.")
+
+try:
+    # Configure the OpenCV stereo algorithm. See
+    # https://docs.opencv.org/3.4/d2/d85/classcv_1_1StereoSGBM.html for a
+    # description of the parameters
+    window_size = 5
+    min_disp = 0
+    # must be divisible by 16
+    num_disp = 112 - min_disp
+    max_disp = min_disp + num_disp
+    stereo = cv2.StereoSGBM_create(minDisparity = min_disp,
+                                    numDisparities = num_disp,
+                                    blockSize = 16,
+                                    P1 = 8*3*window_size**2,
+                                    P2 = 32*3*window_size**2,
+                                    disp12MaxDiff = 1,
+                                    uniquenessRatio = 10,
+                                    speckleWindowSize = 100,
+                                    speckleRange = 32)
+
     # Retreive the stream and intrinsic properties for both cameras
     profiles = pipe.get_active_profile()
 
@@ -521,55 +565,6 @@ def realsense_connect():
     undistort_rectify = {"left"  : (lm1, lm2),
                          "right" : (rm1, rm2)}
 
-#######################################
-# Main code starts here
-#######################################
-
-# Set up a mutex to share data between threads 
-frame_mutex = threading.Lock()
-
-print("INFO: Connecting to Realsense camera.")
-realsense_connect()
-print("INFO: Realsense connected.")
-
-print("INFO: Connecting to vehicle.")
-while (not vehicle_connect()):
-    pass
-print("INFO: Vehicle connected.")
-
-# Listen to the mavlink messages that will be used as trigger to set EKF home automatically
-vehicle.add_message_listener('STATUSTEXT', statustext_callback)
-
-if compass_enabled == 1:
-    # Listen to the attitude data in aeronautical frame
-    vehicle.add_message_listener('ATTITUDE', att_msg_callback)
-
-data = None
-current_confidence = None
-H_aeroRef_aeroBody = None
-heading_north_yaw = None
-
-# Send MAVlink messages in the background
-sched = BackgroundScheduler()
-
-sched.add_job(send_vision_position_message, 'interval', seconds = 1/vision_msg_hz)
-sched.add_job(send_confidence_level_dummy_message, 'interval', seconds = 1/confidence_msg_hz)
-
-# For scale calibration, we will use a thread to monitor user input
-if scale_calib_enable == True:
-    scale_update_thread = threading.Thread(target=scale_update)
-    scale_update_thread.daemon = True
-    scale_update_thread.start()
-
-sched.start()
-
-if compass_enabled == 1:
-    # Wait a short while for yaw to be correctly initiated
-    time.sleep(1)
-
-print("INFO: Sending VISION_POSITION_ESTIMATE messages to FCU.")
-
-try:
     while True:
         # Wait for the next set of frames from the camera
         frames = pipe.wait_for_frames()
@@ -615,19 +610,56 @@ try:
                 print("DEBUG: Raw pos xyz : {}".format( np.array( [data.translation.x, data.translation.y, data.translation.z])))
                 print("DEBUG: NED pos xyz : {}".format( np.array( tf.translation_from_matrix( H_aeroRef_aeroBody))))
              
-        
         # Fetch raw fisheye image frames
         f1 = frames.get_fisheye_frame(1).as_video_frame()
         left_data = np.asanyarray(f1.get_data())
         f2 = frames.get_fisheye_frame(2).as_video_frame()
         right_data = np.asanyarray(f2.get_data())
 
+        # Process image streams
+        frame_copy = {"left" : left_data, "right" : right_data}
+
+        # Undistort and crop the center of the frames
+        center_undistorted = {"left" : cv2.remap(src = frame_copy["left"],
+                                      map1 = undistort_rectify["left"][0],
+                                      map2 = undistort_rectify["left"][1],
+                                      interpolation = cv2.INTER_LINEAR),
+                              "right" : cv2.remap(src = frame_copy["right"],
+                                      map1 = undistort_rectify["right"][0],
+                                      map2 = undistort_rectify["right"][1],
+                                      interpolation = cv2.INTER_LINEAR)}
+
+        # compute the disparity on the center of the frames and convert it to a pixel disparity (divide by DISP_SCALE=16)
+        disparity = stereo.compute(center_undistorted["left"], center_undistorted["right"]).astype(np.float32) / 16.0
+
+        # re-crop just the valid part of the disparity
+        disparity = disparity[:,max_disp:]
+
+        # convert disparity to 0-255 and color it
+        disp_vis = 255*(disparity - min_disp)/ num_disp
+        disp_color = cv2.applyColorMap(cv2.convertScaleAbs(disp_vis,1), cv2.COLORMAP_JET)
+        color_image = cv2.cvtColor(center_undistorted["left"][:,max_disp:], cv2.COLOR_GRAY2RGB)
+
+        # If enabled, display the undistorted image and depth image in the same window
         if display_enable == 1:
-            # Stack both images horizontally
-            cv2.imshow(WINDOW_TITLE, np.hstack((left_data, right_data)))
-            # MUST wait if we want to show images on the screen
+            # Prepare the image to be displayed
+            if display_mode == "stack":
+                display_image = np.hstack((color_image, disp_color))
+            if display_mode == "overlay":
+                display_image = color_image
+                ind = disparity >= min_disp
+                display_image[ind, 0] = disp_color[ind, 0]
+                display_image[ind, 1] = disp_color[ind, 1]
+                display_image[ind, 2] = disp_color[ind, 2]
+            
+            # Display the image
+            cv2.imshow(WINDOW_TITLE, display_image)
+
             key = cv2.waitKey(1)
-            if key == ord('q'):
+
+            if key == ord('s'): display_mode = "stack"
+            if key == ord('o'): display_mode = "overlay"
+            if key == ord('q') or cv2.getWindowProperty(WINDOW_TITLE, cv2.WND_PROP_VISIBLE) < 1:
                 break
 
 except KeyboardInterrupt:
