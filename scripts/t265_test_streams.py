@@ -1,12 +1,21 @@
 #####################################################
 ##          librealsense T265 streams test         ##
 #####################################################
+# Set the path for IDLE
+import sys
+sys.path.append("/usr/local/lib/")
+# Fix this error: https://stackoverflow.com/questions/43019951/after-install-ros-kinetic-cannot-import-opencv
+if '/opt/ros/kinetic/lib/python2.7/dist-packages' in sys.path:
+   sys.path.remove('/opt/ros/kinetic/lib/python2.7/dist-packages') 
+
 # This assumes .so file is found on the same directory
 import pyrealsense2 as rs
 
 # Prettier prints for reverse-engineering
 from pprint import pprint
 import numpy as np
+import cv2
+
 
 # Get realsense pipeline handle
 pipe = rs.pipeline()
@@ -27,7 +36,7 @@ cfg.enable_stream(rs.stream.fisheye, 2) # Right camera
 pipe.start(cfg)
 
 try:
-    for _ in range(10):
+    while True:
         frames = pipe.wait_for_frames()
 
         # Left fisheye camera frame
@@ -40,6 +49,9 @@ try:
 
         print('Left frame', left_data.shape)
         print('Right frame', right_data.shape)
+
+        # Stack both images horizontally
+        # cv2.imshow('T265 Streams', np.hstack((left_data, right_data)))
 
         # Positional data frame
         pose = frames.get_pose_frame()

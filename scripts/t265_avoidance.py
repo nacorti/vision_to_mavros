@@ -117,7 +117,6 @@ stereo = cv2.StereoSGBM_create(minDisparity = min_disp,
                                 speckleWindowSize = 100,
                                 speckleRange = 32)
 
-
 #######################################
 # Parsing user' inputs
 #######################################
@@ -135,6 +134,8 @@ parser.add_argument('--scale_calib_enable', type=bool,
                     help="Scale calibration. Only run while NOT in flight")
 parser.add_argument('--camera_orientation', type=int,
                     help="Configuration for camera orientation. Currently supported: forward, usb port to the right - 0; downward, usb port to the right - 1")
+parser.add_argument('--display_enable',type=int,
+                    help="Enable display images. Ensure that display is connected")
 parser.add_argument('--debug_enable',type=int,
                     help="Enable debug messages on terminal")
 
@@ -146,6 +147,7 @@ vision_msg_hz = args.vision_msg_hz
 confidence_msg_hz = args.confidence_msg_hz
 scale_calib_enable = args.scale_calib_enable
 camera_orientation = args.camera_orientation
+display_enable = args.display_enable
 debug_enable = args.debug_enable
 
 # Using default values if no specified inputs
@@ -197,6 +199,24 @@ if not camera_orientation:
 else:
     print("INFO: Using camera orientation", camera_orientation)
 
+if not display_enable:
+    display_enable = 0
+    print("INFO: Display images: Disabled")
+else:
+    display_enable = 1
+    print("INFO: Display images: Enabled. Checking if monitor is connected...")
+    WINDOW_TITLE = 'T265 images'
+    cv2.namedWindow(WINDOW_TITLE, cv2.WND_PROP_FULLSCREEN)
+    cv2.setWindowProperty(WINDOW_TITLE,cv2.WND_PROP_FULLSCREEN,cv2.WINDOW_FULLSCREEN)
+    print("INFO: Monitor is connected. Press `q` to exit.")
+
+if not debug_enable:
+    debug_enable = 0
+else:
+    debug_enable = 1
+    np.set_printoptions(precision=4, suppress=True) # Format output on terminal 
+    print("INFO: Debug messages enabled.")
+
 # Transformation to convert different camera orientations to NED convention. Replace camera_orientation_default for your configuration.
 #   0: Forward, USB port to the right
 #   1: Downfacing, USB port to the right 
@@ -216,12 +236,6 @@ else:
     H_T265body_aeroBody = np.linalg.inv(H_aeroRef_T265Ref)
 
 
-if not debug_enable:
-    debug_enable = 0
-else:
-    debug_enable = 1
-    np.set_printoptions(precision=4, suppress=True) # Format output on terminal 
-    print("INFO: Debug messages enabled.")
 
 
 #######################################
@@ -560,26 +574,10 @@ try:
         # Wait for the next set of frames from the camera
         frames = pipe.wait_for_frames()
 
-        # Fetch fisheye image frames
-        f1 = frames.get_fisheye_frame(1).as_video_frame()
-        left_data = np.asanyarray(f1.get_data())
-        f2 = frames.get_fisheye_frame(2).as_video_frame()
-        right_data = np.asanyarray(f2.get_data())
-
-        print('Left frame', left_data.shape)
-        print('Right frame', right_data.shape)
-
-        # Stack both images horizontally
-        cv2.imshow('T265 Streams', np.hstack((left_data, right_data)))
-        # MUST wait if we want to show images on the screen
-        key = cv2.waitKey(1)
-        if key == ord('q'):
-            break
-
         # Fetch pose frame
         pose = frames.get_pose_frame()
 
-        # If pose data is ready to process
+        # Process pose streams
         if pose:
             # Store the timestamp for MAVLink messages
             current_time = int(round(time.time() * 1000000))
@@ -616,9 +614,22 @@ try:
                 print("DEBUG: NED RPY[deg]: {}".format( np.array( tf.euler_from_matrix( H_aeroRef_aeroBody, 'sxyz')) * 180 / m.pi))
                 print("DEBUG: Raw pos xyz : {}".format( np.array( [data.translation.x, data.translation.y, data.translation.z])))
                 print("DEBUG: NED pos xyz : {}".format( np.array( tf.translation_from_matrix( H_aeroRef_aeroBody))))
-                
+             
         
-        
+        # Fetch raw fisheye image frames
+        f1 = frames.get_fisheye_frame(1).as_video_frame()
+        left_data = np.asanyarray(f1.get_data())
+        f2 = frames.get_fisheye_frame(2).as_video_frame()
+        right_data = np.asanyarray(f2.get_data())
+
+        if display_enable == 1:
+            # Stack both images horizontally
+            cv2.imshow(WINDOW_TITLE, np.hstack((left_data, right_data)))
+            # MUST wait if we want to show images on the screen
+            key = cv2.waitKey(1)
+            if key == ord('q'):
+                break
+
 except KeyboardInterrupt:
     print("INFO: KeyboardInterrupt has been caught. Cleaning up...")     
 
