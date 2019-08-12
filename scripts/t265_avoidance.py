@@ -69,7 +69,7 @@ from pymavlink import mavutil
 # Default configurations for connection to the FCU
 connection_string_default = '/dev/ttyUSB0'
 connection_baudrate_default = 921600
-vision_msg_hz_default = 30
+vision_msg_hz_default = 20
 confidence_msg_hz_default = 1
 camera_orientation_default = 0
 
@@ -542,7 +542,7 @@ try:
 
     # Construct the left and right projection matrices, the only difference is
     # that the right projection matrix should have a shift along the x axis of
-    # baseline*focal_length
+    # baseline * focal_length
     P_left = np.array([[stereo_focal_px, 0, stereo_cx, 0],
                        [0, stereo_focal_px, stereo_cy, 0],
                        [0,               0,         1, 0]])
@@ -632,16 +632,19 @@ try:
         # compute the disparity on the center of the frames and convert it to a pixel disparity (divide by DISP_SCALE=16)
         disparity = stereo.compute(center_undistorted["left"], center_undistorted["right"]).astype(np.float32) / 16.0
 
-        # re-crop just the valid part of the disparity
-        disparity = disparity[:,max_disp:]
+        # Reprojects a disparity image to 3D space.
+        depth_image = cv2.reprojectImageTo3D(disparity, Q)
 
-        # convert disparity to 0-255 and color it
-        disp_vis = 255*(disparity - min_disp)/ num_disp
-        disp_color = cv2.applyColorMap(cv2.convertScaleAbs(disp_vis,1), cv2.COLORMAP_JET)
-        color_image = cv2.cvtColor(center_undistorted["left"][:,max_disp:], cv2.COLOR_GRAY2RGB)
-
-        # If enabled, display the undistorted image and depth image in the same window
+        # If enabled, display the undistorted image and disparity image in the same window
         if display_enable == 1:
+            # re-crop just the valid part of the disparity
+            disparity = disparity[:,max_disp:]
+
+            # convert disparity to 0-255 and color it
+            disp_vis = 255 * (disparity - min_disp)/ num_disp
+            disp_color = cv2.applyColorMap(cv2.convertScaleAbs(disp_vis,1), cv2.COLORMAP_JET)
+            color_image = cv2.cvtColor(center_undistorted["left"][:,max_disp:], cv2.COLOR_GRAY2RGB)
+
             # Prepare the image to be displayed
             if display_mode == "stack":
                 display_image = np.hstack((color_image, disp_color))
