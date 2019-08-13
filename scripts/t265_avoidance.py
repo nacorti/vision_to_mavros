@@ -283,8 +283,8 @@ def send_obstacle_distance_message():
         0,                                      # sensor_type, defined here: https://mavlink.io/en/messages/common.html#MAV_DISTANCE_SENSOR
         distances,                              # distances[72]
         0,                                      # increment, uint8_t, deg
-        10,	                                    # min_distance, uint16_t, cm
-        200,                                    # max_distance, uint16_t, cm
+        5,	                                    # min_distance, uint16_t, cm
+        65,                                     # max_distance, uint16_t, cm
         1.25,	                                # increment_f, float, deg
         -45                                     # angle_offset, float, deg
     )
@@ -594,19 +594,6 @@ try:
                   [0, 0,       0, stereo_focal_px],
                   [0, 0, -1/T[0], 0]])
 
-    #Perspective transformation matrix
-    #This transformation matrix is from the openCV documentation, didn't seem to work for me. 
-    Q1= np.array([[1,0,0,-stereo_height_px/2.0],
-                  [0,-1,0,stereo_height_px/2.0],
-                  [0,0,0,-stereo_focal_px],
-                  [0,0,1,0]])
-    #This transformation matrix is derived from Prof. Didier Stricker's power point presentation on computer vision. 
-    #Link : https://ags.cs.uni-kl.de/fileadmin/inf_ags/3dcv-ws14-15/3DCV_lec01_camera.pdf
-    Q2 = np.array([[1,0,0,0],
-        [0,-1,0,0],
-        [0,0,stereo_focal_px*0.05,0], #Focal length multiplication obtained experimentally. 
-        [0,0,0,1]])
-
     # Create an undistortion map for the left and right camera which applies the
     # rectification and undoes the camera distortion. This only has to be done
     # once
@@ -680,19 +667,24 @@ try:
                                       map2 = undistort_rectify["right"][1],
                                       interpolation = cv2.INTER_LINEAR)}
 
-        # compute the disparity on the center of the frames and convert it to a pixel disparity (divide by DISP_SCALE=16)
+        # Compute the disparity on the center of the frames and convert it to a pixel disparity (divide by DISP_SCALE=16)
         disparity = stereo.compute(center_undistorted["left"], center_undistorted["right"]).astype(np.float32) / 16.0
 
-        # re-crop just the valid part of the disparity
+        # Re-crop just the valid part of the disparity
         disparity = disparity[:,max_disp:]
 
-        # # Reprojects a disparity image to 3D space.
+        # Reprojects a disparity image to 3D space.
         points_3D = cv2.reprojectImageTo3D(disparity, Q) 
 
-        z_all = points_3D[:,:,2]
-        # print("Disparity Depth", points_3D.shape, z_all.shape)
-        print("INFO: center depth", np.linalg.norm(points_3D[150,150,:]))
-        print("INFO: mean depth of scene", np.mean(z_all))
+        # Convert 3D coordinates to distance from optical center to the point, from m to cm
+        for i in range(72):
+            # distances[i] = (np.linalg.norm(points_3D[i*4+5,150,:]) + np.linalg.norm(points_3D[i*4+6,150,:]) + np.linalg.norm(points_3D[i*4+7,150,:]) + np.linalg.norm(points_3D[i*4+8,150,:]))* 100 / 4 
+            distances[i] = np.linalg.norm(points_3D[i * 4,150,:]) * 100
+            # print("# distance ", i, distances[i])
+        
+        # if debug_enable == 1:
+        # print("INFO: distance left center right", distances[0], distances[36], distances[71])
+        print("distances from left to right: ", distances)
 
         # If enabled, display the undistorted image and disparity image in the same window
         if display_enable == 1:
