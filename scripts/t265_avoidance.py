@@ -70,6 +70,7 @@ from pymavlink import mavutil
 connection_string_default = '/dev/ttyUSB0'
 connection_baudrate_default = 921600
 vision_msg_hz_default = 20
+obstacle_distance_msg_hz_default = 15
 confidence_msg_hz_default = 1
 camera_orientation_default = 0
 
@@ -90,11 +91,18 @@ home_lat = 151269321       # Somewhere in Africa
 home_lon = 16624301        # Somewhere in Africa
 home_alt = 163000 
 
+# Timestamp (UNIX Epoch time or time since system boot)
+current_time = 0
+
 vehicle = None
 pipe = None
 
 # pose data confidence: 0x0 - Failed / 0x1 - Low / 0x2 - Medium / 0x3 - High 
 pose_data_confidence_level = ('Failed', 'Low', 'Medium', 'High')
+
+# Obstacle distances in front of the sensor, starting from the left in increment degrees to the right
+# See here: https://mavlink.io/en/messages/common.html#OBSTACLE_DISTANCE
+distances = np.zeros((72,), dtype=np.uint16)
 
 #######################################
 # Parsing user' inputs
@@ -107,6 +115,8 @@ parser.add_argument('--baudrate', type=float,
                     help="Vehicle connection baudrate. If not specified, a default value will be used.")
 parser.add_argument('--vision_msg_hz', type=float,
                     help="Update frequency for VISION_POSITION_ESTIMATE message. If not specified, a default value will be used.")
+parser.add_argument('--obstacle_distance_msg_hz', type=float,
+                    help="Update frequency for OBSTALCE_DISTANCE message. If not specified, a default value will be used.")
 parser.add_argument('--confidence_msg_hz', type=float,
                     help="Update frequency for confidence level. If not specified, a default value will be used.")
 parser.add_argument('--scale_calib_enable', type=bool,
@@ -123,13 +133,14 @@ args = parser.parse_args()
 connection_string = args.connect
 connection_baudrate = args.baudrate
 vision_msg_hz = args.vision_msg_hz
+obstacle_distance_msg_hz = args.obstacle_distance_msg_hz
 confidence_msg_hz = args.confidence_msg_hz
 scale_calib_enable = args.scale_calib_enable
 camera_orientation = args.camera_orientation
 display_enable = args.display_enable
 debug_enable = args.debug_enable
 
-# Using default values if no specified inputs
+# Using default values if no input is provided
 if not connection_string:
     connection_string = connection_string_default
     print("INFO: Using default connection_string", connection_string)
@@ -153,6 +164,12 @@ if not confidence_msg_hz:
     print("INFO: Using default confidence_msg_hz", confidence_msg_hz)
 else:
     print("INFO: Using confidence_msg_hz", confidence_msg_hz)
+
+if not obstacle_distance_msg_hz:
+    obstacle_distance_msg_hz = obstacle_distance_msg_hz_default
+    print("INFO: Using default obstacle_distance_msg_hz", obstacle_distance_msg_hz)
+else:
+    print("INFO: Using obstacle_distance_msg_hz", obstacle_distance_msg_hz)
 
 if body_offset_enabled == 1:
     print("INFO: Using camera position offset: Enabled, x y z is", body_offset_x, body_offset_y, body_offset_z)
@@ -180,8 +197,7 @@ else:
     print("INFO: Display images: Enabled. Checking if monitor is connected...")
     WINDOW_TITLE = 'T265 images'
     cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_AUTOSIZE)
-    print("INFO: Monitor is connected")
-    print("INFO: Press `s`: stack the images side by side, `o`: overlay depth over rgb, `q`: exit.")
+    print("INFO: Monitor is connected. Press `s`: stack the images side by side, `o`: overlay depth over rgb, `q`: exit.")
     display_mode = "stack"
 
 if not debug_enable:
@@ -254,6 +270,27 @@ def fisheye_distortion(intrinsics):
 #######################################
 # Functions for MAVLink
 #######################################
+
+# https://mavlink.io/en/messages/common.html#OBSTACLE_DISTANCE
+# In the case of a forward facing camera with a 90deg wide view (45 left, 45 right) a message would look like:
+# angle_offset = (MiddleAngle-half) = 0 - (90/2) = -45
+# increment_f = (90/72) = 1.25
+def send_obstacle_distance_message():
+    global current_time, distances
+
+    msg = vehicle.message_factory.obstacle_distance_encode(
+        current_time,                           # us Timestamp (UNIX time or time since system boot)
+        0,                                      # sensor_type, defined here: https://mavlink.io/en/messages/common.html#MAV_DISTANCE_SENSOR
+        distances,                              # distances[72]
+        0,                                      # increment, uint8_t, deg
+        10,	                                    # min_distance, uint16_t, cm
+        200,                                    # max_distance, uint16_t, cm
+        1.25,	                                # increment_f, float, deg
+        -45                                     # angle_offset, float, deg
+    )
+
+    vehicle.send_mavlink(msg)
+    vehicle.flush()
 
 # https://mavlink.io/en/messages/common.html#VISION_POSITION_ESTIMATE
 def send_vision_position_message():
@@ -449,9 +486,9 @@ heading_north_yaw = None
 
 # Send MAVlink messages in the background
 sched = BackgroundScheduler()
-
 sched.add_job(send_vision_position_message, 'interval', seconds = 1/vision_msg_hz)
 sched.add_job(send_confidence_level_dummy_message, 'interval', seconds = 1/confidence_msg_hz)
+sched.add_job(send_obstacle_distance_message, 'interval', seconds = 1/obstacle_distance_msg_hz)
 
 # For scale calibration, we will use a thread to monitor user input
 if scale_calib_enable == True:
@@ -472,7 +509,7 @@ try:
     # https://docs.opencv.org/3.4/d2/d85/classcv_1_1StereoSGBM.html for a
     # description of the parameters
     window_size = 5
-    min_disp = 0
+    min_disp = 16
     # must be divisible by 16
     num_disp = 112 - min_disp
     max_disp = min_disp + num_disp
@@ -496,8 +533,9 @@ try:
 
     # Print information about both cameras
     print("INFO: Using stereo fisheye cameras")
-    print("INFO: T265 Left camera:",  intrinsics["left"])
-    print("INFO: T265 Right camera:", intrinsics["right"])
+    if debug_enable == 1:
+        print("INFO: T265 Left camera:",  intrinsics["left"])
+        print("INFO: T265 Right camera:", intrinsics["right"])
 
     # Translate the intrinsics from librealsense into OpenCV
     K_left  = camera_matrix(intrinsics["left"])
@@ -523,8 +561,8 @@ try:
     #     \   |   /
     #      \ fov /
     #        \|/
-    stereo_fov_rad = 90 * (m.pi/180)  # 90 degree desired fov
-    stereo_height_px = 300          # 300x300 pixel stereo output
+    stereo_fov_rad = 90 * (m.pi/180)    # 90 degree desired fov
+    stereo_height_px = 300              # 300x300 pixel stereo output
     stereo_focal_px = stereo_height_px/2 / m.tan(stereo_fov_rad/2)
 
     # We set the left rotation to identity and the right rotation
@@ -555,6 +593,19 @@ try:
                   [0, 1,       0, -stereo_cy],
                   [0, 0,       0, stereo_focal_px],
                   [0, 0, -1/T[0], 0]])
+
+    #Perspective transformation matrix
+    #This transformation matrix is from the openCV documentation, didn't seem to work for me. 
+    Q1= np.array([[1,0,0,-stereo_height_px/2.0],
+                  [0,-1,0,stereo_height_px/2.0],
+                  [0,0,0,-stereo_focal_px],
+                  [0,0,1,0]])
+    #This transformation matrix is derived from Prof. Didier Stricker's power point presentation on computer vision. 
+    #Link : https://ags.cs.uni-kl.de/fileadmin/inf_ags/3dcv-ws14-15/3DCV_lec01_camera.pdf
+    Q2 = np.array([[1,0,0,0],
+        [0,-1,0,0],
+        [0,0,stereo_focal_px*0.05,0], #Focal length multiplication obtained experimentally. 
+        [0,0,0,1]])
 
     # Create an undistortion map for the left and right camera which applies the
     # rectification and undoes the camera distortion. This only has to be done
@@ -632,14 +683,19 @@ try:
         # compute the disparity on the center of the frames and convert it to a pixel disparity (divide by DISP_SCALE=16)
         disparity = stereo.compute(center_undistorted["left"], center_undistorted["right"]).astype(np.float32) / 16.0
 
-        # Reprojects a disparity image to 3D space.
-        depth_image = cv2.reprojectImageTo3D(disparity, Q)
+        # re-crop just the valid part of the disparity
+        disparity = disparity[:,max_disp:]
+
+        # # Reprojects a disparity image to 3D space.
+        points_3D = cv2.reprojectImageTo3D(disparity, Q) 
+
+        z_all = points_3D[:,:,2]
+        # print("Disparity Depth", points_3D.shape, z_all.shape)
+        print("INFO: center depth", np.linalg.norm(points_3D[150,150,:]))
+        print("INFO: mean depth of scene", np.mean(z_all))
 
         # If enabled, display the undistorted image and disparity image in the same window
         if display_enable == 1:
-            # re-crop just the valid part of the disparity
-            disparity = disparity[:,max_disp:]
-
             # convert disparity to 0-255 and color it
             disp_vis = 255 * (disparity - min_disp)/ num_disp
             disp_color = cv2.applyColorMap(cv2.convertScaleAbs(disp_vis,1), cv2.COLORMAP_JET)
@@ -648,20 +704,24 @@ try:
             # Prepare the image to be displayed
             if display_mode == "stack":
                 display_image = np.hstack((color_image, disp_color))
-            if display_mode == "overlay":
+            elif display_mode == "overlay":
                 display_image = color_image
                 ind = disparity >= min_disp
                 display_image[ind, 0] = disp_color[ind, 0]
                 display_image[ind, 1] = disp_color[ind, 1]
                 display_image[ind, 2] = disp_color[ind, 2]
-            
+            elif display_mode == "depth":
+                # display_image = depth_image
+                display_image = np.hstack((points_3D, disp_color))
+
             # Display the image
             cv2.imshow(WINDOW_TITLE, display_image)
 
+            # Read keyboard input on the image window
             key = cv2.waitKey(1)
-
             if key == ord('s'): display_mode = "stack"
-            if key == ord('o'): display_mode = "overlay"
+            if key == ord('a'): display_mode = "overlay"
+            if key == ord('d'): display_mode = "depth"
             if key == ord('q') or cv2.getWindowProperty(WINDOW_TITLE, cv2.WND_PROP_VISIBLE) < 1:
                 break
 
