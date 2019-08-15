@@ -292,6 +292,24 @@ def send_obstacle_distance_message():
     vehicle.send_mavlink(msg)
     vehicle.flush()
 
+def send_distance_sensor_message():
+    global current_time, distances
+
+    msg = vehicle.message_factory.distance_sensor_encode(
+        0,              # us Timestamp (UNIX time or time since system boot) (ignored)
+        10,             # min_distance, uint16_t, cm
+        65,             # min_distance, uint16_t, cm
+        distances[36],  # current_distance,	uint16_t, cm	
+        0,	            # type : 0 (ignored)
+        0,              # id : 0 (ignored)
+        0,              # forward
+        0               # covariance : 0 (ignored)
+    )
+
+    vehicle.send_mavlink(msg)
+    vehicle.flush()
+
+
 # https://mavlink.io/en/messages/common.html#VISION_POSITION_ESTIMATE
 def send_vision_position_message():
     global current_time, H_aeroRef_aeroBody
@@ -488,7 +506,8 @@ heading_north_yaw = None
 sched = BackgroundScheduler()
 sched.add_job(send_vision_position_message, 'interval', seconds = 1/vision_msg_hz)
 sched.add_job(send_confidence_level_dummy_message, 'interval', seconds = 1/confidence_msg_hz)
-sched.add_job(send_obstacle_distance_message, 'interval', seconds = 1/obstacle_distance_msg_hz)
+# sched.add_job(send_obstacle_distance_message, 'interval', seconds = 1/obstacle_distance_msg_hz)
+sched.add_job(send_distance_sensor_message, 'interval', seconds = 1/obstacle_distance_msg_hz)
 
 # For scale calibration, we will use a thread to monitor user input
 if scale_calib_enable == True:
@@ -641,12 +660,12 @@ try:
                 H_aeroRef_aeroBody = H_aeroRef_aeroBody.dot( tf.euler_matrix(0, 0, heading_north_yaw, 'sxyz'))
 
             # Show debug messages here
-            if debug_enable == 1:
-                os.system('clear') # This helps in displaying the messages to be more readable
-                print("DEBUG: Raw RPY[deg]: {}".format( np.array( tf.euler_from_matrix( H_T265Ref_T265body, 'sxyz')) * 180 / m.pi))
-                print("DEBUG: NED RPY[deg]: {}".format( np.array( tf.euler_from_matrix( H_aeroRef_aeroBody, 'sxyz')) * 180 / m.pi))
-                print("DEBUG: Raw pos xyz : {}".format( np.array( [data.translation.x, data.translation.y, data.translation.z])))
-                print("DEBUG: NED pos xyz : {}".format( np.array( tf.translation_from_matrix( H_aeroRef_aeroBody))))
+            # if debug_enable == 1:
+            #     os.system('clear') # This helps in displaying the messages to be more readable
+            #     print("DEBUG: Raw RPY[deg]: {}".format( np.array( tf.euler_from_matrix( H_T265Ref_T265body, 'sxyz')) * 180 / m.pi))
+            #     print("DEBUG: NED RPY[deg]: {}".format( np.array( tf.euler_from_matrix( H_aeroRef_aeroBody, 'sxyz')) * 180 / m.pi))
+            #     print("DEBUG: Raw pos xyz : {}".format( np.array( [data.translation.x, data.translation.y, data.translation.z])))
+            #     print("DEBUG: NED pos xyz : {}".format( np.array( tf.translation_from_matrix( H_aeroRef_aeroBody))))
              
         # Fetch raw fisheye image frames
         f1 = frames.get_fisheye_frame(1).as_video_frame()
@@ -678,13 +697,11 @@ try:
 
         # Convert 3D coordinates to distance from optical center to the point, from m to cm
         for i in range(72):
-            # distances[i] = (np.linalg.norm(points_3D[i*4+5,150,:]) + np.linalg.norm(points_3D[i*4+6,150,:]) + np.linalg.norm(points_3D[i*4+7,150,:]) + np.linalg.norm(points_3D[i*4+8,150,:]))* 100 / 4 
             distances[i] = np.linalg.norm(points_3D[i * 4,150,:]) * 100
             # print("# distance ", i, distances[i])
         
-        # if debug_enable == 1:
-        # print("INFO: distance left center right", distances[0], distances[36], distances[71])
-        print("distances from left to right: ", distances)
+        if debug_enable == 1:
+            print("INFO: distances from left to right: ", distances[0], distances[20], distances[40], distances[60], distances[71])
 
         # If enabled, display the undistorted image and disparity image in the same window
         if display_enable == 1:
